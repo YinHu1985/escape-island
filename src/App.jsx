@@ -314,6 +314,19 @@ const generateBuilding = (buildingId, difficulty, theme, rootSeed, assignedSpeci
   const roomIdsForItems = roomPositions.map(r => r.id).filter(id => id !== 0 && id !== numRooms - 1);
   if (roomIdsForItems.length === 0) roomIdsForItems.push(0);
 
+  // Distribute items deterministically to valid rooms first
+  const itemsPerRoom = {};
+  const itemsToPlace = [...assignedSpecialItems];
+  
+  while(itemsToPlace.length > 0) {
+      // Pick a random room from valid list for this specific item
+      const rIdx = getSeededInt(rng, 0, roomIdsForItems.length - 1);
+      const roomId = roomIdsForItems[rIdx];
+      
+      if (!itemsPerRoom[roomId]) itemsPerRoom[roomId] = [];
+      itemsPerRoom[roomId].push(itemsToPlace.pop());
+  }
+
   const rooms = roomPositions.map(pos => {
       const roomSeed = Math.floor(rng() * 1000000); 
       const size = ROOM_VARIANTS[getSeededInt(rng, 0, ROOM_VARIANTS.length - 1)];
@@ -338,13 +351,17 @@ const generateBuilding = (buildingId, difficulty, theme, rootSeed, assignedSpeci
       const items = [];
       const itemRng = mulberry32(roomSeed + 999);
 
-      // A. Special Items
-      if (assignedSpecialItems.length > 0 && roomIdsForItems.includes(pos.id)) {
-          if (itemRng() < 0.5 || roomIdsForItems.length <= assignedSpecialItems.length) { 
-             const specialType = assignedSpecialItems.pop();
+      // A. Special Items (Deterministic)
+      if (itemsPerRoom[pos.id]) {
+          itemsPerRoom[pos.id].forEach(specialType => {
              const spot = pickItemLocation(itemRng, reachable);
-             if (spot) items.push({ id: Math.floor(itemRng()*100000), type: specialType, x: spot.x * TILE_SIZE + 12, y: spot.y * TILE_SIZE + 12, w: 24, h: 24, isUnlimited: false });
-          }
+             if (spot) {
+                 items.push({ id: Math.floor(itemRng()*100000), type: specialType, x: spot.x * TILE_SIZE + 12, y: spot.y * TILE_SIZE + 12, w: 24, h: 24, isUnlimited: false });
+             } else {
+                 // Fallback if flood fill failed (should not happen, but safe fallback to center)
+                 items.push({ id: Math.floor(itemRng()*100000), type: specialType, x: (size.w/2) * TILE_SIZE + 12, y: (size.h/2) * TILE_SIZE + 12, w: 24, h: 24, isUnlimited: false });
+             }
+          });
       }
 
       // B. Random Consumables (Unlimited)
@@ -399,29 +416,17 @@ const VirtualJoystick = ({ onMove }) => {
     const rect = stickRef.current.getBoundingClientRect();
     const centerX = rect.left + rect.width / 2;
     const centerY = rect.top + rect.height / 2;
-    
-    const rawDx = touch.clientX - centerX;
-    const rawDy = touch.clientY - centerY;
-    const distance = Math.sqrt(rawDx * rawDx + rawDy * rawDy);
+    let dx = touch.clientX - centerX;
+    let dy = touch.clientY - centerY;
+    const distance = Math.sqrt(dx * dx + dy * dy);
     const maxDist = 40;
-    
-    // 1. Visual Update (Clamped to circle)
-    let visualDx = rawDx;
-    let visualDy = rawDy;
-    const angle = Math.atan2(rawDy, rawDx);
-
     if (distance > maxDist) {
-      visualDx = Math.cos(angle) * maxDist;
-      visualDy = Math.sin(angle) * maxDist;
+      const angle = Math.atan2(dy, dx);
+      dx = Math.cos(angle) * maxDist;
+      dy = Math.sin(angle) * maxDist;
     }
-    setPos({ x: visualDx, y: visualDy });
-
-    // 2. Logical Update (Normalized Unit Vector for Constant Speed)
-    if (distance > 10) { // Small deadzone to prevent jitter
-        onMove({ x: Math.cos(angle), y: Math.sin(angle) });
-    } else {
-        onMove({ x: 0, y: 0 });
-    }
+    setPos({ x: dx, y: dy });
+    onMove({ x: dx / maxDist, y: dy / maxDist });
   };
 
   return (
