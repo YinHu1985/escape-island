@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, Heart, Zap, Shield, Map as MapIcon, RotateCcw, Crosshair, Pizza, Grape, Box, ShoppingBag, Bomb, Cookie, Trophy, Info, Wind, Briefcase, FileText, Key, Lock, ArrowRight } from 'lucide-react';
+import { Play, Heart, Zap, Shield, Map as MapIcon, RotateCcw, Crosshair, Pizza, Grape, Box, ShoppingBag, Bomb, Cookie, Trophy, Info, Wind, Briefcase, FileText, Key, Lock, ArrowRight, Target } from 'lucide-react';
 
 /**
  * ==========================================
@@ -65,7 +65,8 @@ const COLORS = {
   minimapExplored: '#3498db',
   minimapActive: '#ecf0f1',
   minimapItem: '#f1c40f',
-  minimapBoss: '#e74c3c'
+  minimapBoss: '#e74c3c',
+  reticle: '#ff0000' // Target indicator color
 };
 
 const CHARACTERS = [
@@ -398,17 +399,29 @@ const VirtualJoystick = ({ onMove }) => {
     const rect = stickRef.current.getBoundingClientRect();
     const centerX = rect.left + rect.width / 2;
     const centerY = rect.top + rect.height / 2;
-    let dx = touch.clientX - centerX;
-    let dy = touch.clientY - centerY;
-    const distance = Math.sqrt(dx * dx + dy * dy);
+    
+    const rawDx = touch.clientX - centerX;
+    const rawDy = touch.clientY - centerY;
+    const distance = Math.sqrt(rawDx * rawDx + rawDy * rawDy);
     const maxDist = 40;
+    
+    // 1. Visual Update (Clamped to circle)
+    let visualDx = rawDx;
+    let visualDy = rawDy;
+    const angle = Math.atan2(rawDy, rawDx);
+
     if (distance > maxDist) {
-      const angle = Math.atan2(dy, dx);
-      dx = Math.cos(angle) * maxDist;
-      dy = Math.sin(angle) * maxDist;
+      visualDx = Math.cos(angle) * maxDist;
+      visualDy = Math.sin(angle) * maxDist;
     }
-    setPos({ x: dx, y: dy });
-    onMove({ x: dx / maxDist, y: dy / maxDist });
+    setPos({ x: visualDx, y: visualDy });
+
+    // 2. Logical Update (Normalized Unit Vector for Constant Speed)
+    if (distance > 10) { // Small deadzone to prevent jitter
+        onMove({ x: Math.cos(angle), y: Math.sin(angle) });
+    } else {
+        onMove({ x: 0, y: 0 });
+    }
   };
 
   return (
@@ -459,6 +472,7 @@ export default function App() {
     particles: [],
     shockwaves: [], 
     input: { x: 0, y: 0, fire: false, bomb: false },
+    currentTarget: null, // Track currently targeted enemy for rendering
     lastTime: 0
   });
 
@@ -690,12 +704,40 @@ export default function App() {
       }
     }
 
+    // Determine Closest Enemy for Auto-Aim
+    let closestEnemy = null;
+    let minDst = 1000; // Targeting Range
+    g.enemies.forEach(e => {
+        // Removed check for STUNNED state to allow persistent targeting
+        const dist = Math.hypot(e.x - g.player.x, e.y - g.player.y);
+        if (dist < minDst) {
+            minDst = dist;
+            closestEnemy = e;
+        }
+    });
+    g.currentTarget = closestEnemy; // Save for rendering reticle
+
     // Projectile Combat
     if (g.input.fire && g.player.cooldown <= 0) {
+      let vx = 0, vy = 0;
+      
+      // Auto-Aim Logic
+      if (closestEnemy) {
+          const angle = Math.atan2(closestEnemy.y - g.player.y, closestEnemy.x - g.player.x);
+          const bulletSpeed = 10;
+          vx = Math.cos(angle) * bulletSpeed;
+          vy = Math.sin(angle) * bulletSpeed;
+      } else {
+          // Fallback to manual facing
+          // Normalize facing vector first to ensure consistent speed
+          const len = Math.sqrt(g.player.facing.x * g.player.facing.x + g.player.facing.y * g.player.facing.y) || 1;
+          vx = (g.player.facing.x / len) * 10;
+          vy = (g.player.facing.y / len) * 10;
+      }
+
       g.projectiles.push({
         x: g.player.x + 16, y: g.player.y + 16,
-        vx: (g.input.x || g.player.facing.x || 1) * 10, 
-        vy: (g.input.y || g.player.facing.y) * 10,
+        vx, vy,
         life: 60 
       });
       g.player.cooldown = selectedChar.fireRate / (1000/60);
@@ -909,6 +951,8 @@ export default function App() {
     }
 
     g.particles = []; g.projectiles = [];
+    // Reset Target
+    g.currentTarget = null;
     setupRoom(nextRoomId, g.building);
   };
 
@@ -1085,6 +1129,18 @@ export default function App() {
         ctx.fillStyle = 'red'; ctx.fillRect(e.x, e.y - 10, 32, 4);
         ctx.fillStyle = 'green'; ctx.fillRect(e.x, e.y - 10, 32 * (e.hp / e.maxHp), 4);
     });
+
+    // TARGET RETICLE (Auto-Aim Visual)
+    if (g.currentTarget) {
+        ctx.strokeStyle = COLORS.reticle;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([4, 2]); // Dashed line
+        ctx.beginPath();
+        // Rotating circle effect can be added with time, simple circle for now
+        ctx.arc(g.currentTarget.x + 16, g.currentTarget.y + 16, 24, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]); // Reset dash
+    }
 
     // Player
     const charKey = `char_${selectedChar.id}_${g.player.state}`;
