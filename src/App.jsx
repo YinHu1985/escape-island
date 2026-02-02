@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, Heart, Zap, Shield, Map as MapIcon, RotateCcw, Crosshair, Pizza, Grape, Box, ShoppingBag, Bomb, Cookie, Trophy, Info } from 'lucide-react';
+import { Play, Heart, Zap, Shield, Map as MapIcon, RotateCcw, Crosshair, Pizza, Grape, Box, ShoppingBag, Bomb, Cookie, Trophy, Info, Wind, Briefcase, FileText, Key, Lock, ArrowRight } from 'lucide-react';
 
 /**
  * ==========================================
@@ -11,11 +11,10 @@ const PLAYER_SIZE = 32;
 const FPS = 60;
 const FALLBACK_THEME = 'ballroom'; 
 const BOMB_COST = 1; 
+const HIDDEN_BUILDING_ID = 999; // Special ID for the hidden level
 
-// Themes for the buildings
 const THEMES = ['bathroom', 'ballroom', 'living_room', 'warehouse', 'dungeon', 'garden'];
 
-// Theme Color Palettes (Fallback when images missing)
 const THEME_COLORS = {
     bathroom: { bg: '#e0f7fa', wall: '#006064', floor: '#b2ebf2', door: '#00bcd4' },
     ballroom: { bg: '#3e2723', wall: '#4e342e', floor: '#5d4037', door: '#d7ccc8' },
@@ -25,7 +24,6 @@ const THEME_COLORS = {
     garden: { bg: '#e8f5e9', wall: '#1b5e20', floor: '#66bb6a', door: '#81c784' }
 };
 
-// Possible room sizes
 const ROOM_VARIANTS = [
     { w: 15, h: 11 }, 
     { w: 11, h: 9 },  
@@ -33,9 +31,17 @@ const ROOM_VARIANTS = [
     { w: 15, h: 15 }, 
 ];
 
-// Global/Item Colors
+const GLOBAL_ITEM_LIMITS = {
+    pizzaBox: 3,
+    sodaCarrier: 3,
+    rollerSkates: 2,
+    cookieBag: 2,
+    file: 5,
+    key: 1
+};
+
 const COLORS = {
-  background: '#2c3e50', // Fallback
+  background: '#2c3e50', 
   wall: '#34495e',
   floor: '#95a5a6',
   door: '#e67e22',
@@ -48,6 +54,10 @@ const COLORS = {
   pizzaBox: '#d35400',
   soda: '#8e44ad', 
   sodaCarrier: '#9b59b6',
+  rollerSkates: '#3498db',
+  cookieBag: '#795548',
+  file: '#ecf0f1',
+  key: '#f1c40f',
   shockwave: '#8e44ad', 
   uiBg: 'rgba(0,0,0,0.7)',
   minimapBg: 'rgba(0, 0, 0, 0.6)',
@@ -63,20 +73,22 @@ const CHARACTERS = [
     id: 'runner',
     name: 'Swift Scout',
     description: 'Fast, moderate MP.',
-    speed: 5,
+    speed: 4, 
     maxHp: 3,
     maxMp: 3,
     fireRate: 400,
+    damage: 1,
     color: '#1abc9c',
   },
   {
     id: 'tank',
     name: 'Heavy Guard',
     description: 'Tough, low MP capacity.',
-    speed: 3.5,
+    speed: 3, 
     maxHp: 5,
     maxMp: 2,
     fireRate: 600,
+    damage: 1,
     color: '#8e44ad',
   }
 ];
@@ -84,7 +96,7 @@ const CHARACTERS = [
 const DIFFICULTY_SCALE = {
   roomsMultiplier: 1.5,
   enemyCountMultiplier: 1.2,
-  enemySpeedBase: 2,
+  enemySpeedBase: 1.2, 
 };
 
 /**
@@ -105,29 +117,86 @@ const mulberry32 = (a) => {
 const getSeededInt = (rng, min, max) => Math.floor(rng() * (max - min + 1)) + min;
 const getRandomInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
 
+// Distribute special items globally across buildings
 const generateWorldMap = () => {
-  const levels = 6; 
+  const columnsConfig = [1, 2, 2, 2, 1]; 
   const buildings = [];
-  for (let i = 0; i < levels; i++) {
-    buildings.push({
-      id: i,
-      level: i + 1,
-      theme: THEMES[i % THEMES.length],
-      cleared: false,
-      locked: i !== 0,
-      x: 100 + i * 150, 
-      y: 300 + (Math.random() * 100 - 50),
-    });
+  let idCounter = 0;
+
+  // Create Special Item Pool (Exclude Key initially to place it specifically)
+  let itemPool = [];
+  Object.entries(GLOBAL_ITEM_LIMITS).forEach(([type, count]) => {
+      if (type === 'key') return; 
+      for(let i=0; i<count; i++) itemPool.push(type);
+  });
+  
+  // Shuffle Pool
+  for (let i = itemPool.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [itemPool[i], itemPool[j]] = [itemPool[j], itemPool[i]];
   }
+
+  // 1. Generate Standard Columns
+  columnsConfig.forEach((count, colIndex) => {
+      for(let i=0; i<count; i++) {
+          buildings.push({
+              id: idCounter++,
+              column: colIndex, 
+              level: colIndex + 1, 
+              theme: THEMES[(colIndex + i) % THEMES.length],
+              cleared: false,
+              locked: colIndex !== 0, 
+              hidden: false,
+              specialItems: [], 
+              x: 0, y: 0 
+          });
+      }
+  });
+
+  // 2. Generate Hidden Building (Left of Start)
+  buildings.push({
+      id: HIDDEN_BUILDING_ID,
+      column: -1, // Left of column 0
+      level: 6,   // Same difficulty as last level
+      theme: 'dungeon',
+      cleared: false,
+      locked: true,
+      hidden: true, // Not visible initially
+      specialItems: [],
+      x: 0, y: 0
+  });
+
+  // 3. Place Key: Ensure it is NOT in the last column and NOT in the hidden building
+  const lastColIdx = columnsConfig.length - 1;
+  const keyCandidates = buildings.filter(b => b.id !== HIDDEN_BUILDING_ID && b.column < lastColIdx);
+  
+  if (keyCandidates.length > 0) {
+      // Pick random valid building
+      const kIdx = Math.floor(Math.random() * keyCandidates.length);
+      keyCandidates[kIdx].specialItems.push('key');
+  }
+
+  // 4. Assign remaining items to buildings (Round Robin)
+  let bIdx = 0;
+  while(itemPool.length > 0) {
+      // Skip hidden building for random loot distribution
+      if (buildings[bIdx].id !== HIDDEN_BUILDING_ID) {
+          buildings[bIdx].specialItems.push(itemPool.pop());
+      }
+      bIdx = (bIdx + 1) % buildings.length;
+  }
+  
   return buildings;
 };
 
-const generateRoomLayout = (width, height, seed) => {
+// Layout Generator + Reachability Check
+const generateRoomLayout = (width, height, seed, doors, isBossRoom) => {
   const rng = mulberry32(seed);
   const grid = [];
   const midX = Math.floor(width / 2);
   const midY = Math.floor(height / 2);
 
+  // 1. Generate Base Grid
   for (let y = 0; y < height; y++) {
     const row = [];
     for (let x = 0; x < width; x++) {
@@ -135,9 +204,21 @@ const generateRoomLayout = (width, height, seed) => {
       if (x === 0 || x === width - 1 || y === 0 || y === height - 1) {
         type = 'wall';
       } else {
-        const isCenter = Math.abs(x - midX) <= 2 && Math.abs(y - midY) <= 2;
-        const isAxis = x === midX || y === midY; 
-        if (rng() < 0.15 && !isCenter && !isAxis) { 
+        // Safe Zones Logic
+        let isSafe = false;
+        if (Math.abs(x - midX) <= 1 && Math.abs(y - midY) <= 1) isSafe = true;
+        if (doors.top !== null && x === midX && y < midY) isSafe = true;
+        if (doors.bottom !== null && x === midX && y > midY) isSafe = true;
+        if (doors.left !== null && y === midY && x < midX) isSafe = true;
+        if (doors.right !== null && y === midY && x > midX) isSafe = true;
+        
+        if (isBossRoom) {
+            const bossDoorX = midX + 2;
+            if (y === midY && x > midX && x <= bossDoorX) isSafe = true; 
+            if (x === bossDoorX && y < midY) isSafe = true; 
+        }
+
+        if (!isSafe && rng() < 0.15) { 
             type = 'furniture';
         }
       }
@@ -145,91 +226,155 @@ const generateRoomLayout = (width, height, seed) => {
     }
     grid.push(row);
   }
-  return { grid };
+
+  // 2. Flood Fill to find valid item spots
+  const reachable = [];
+  const visited = new Set();
+  const queue = [{x: midX, y: midY}];
+  visited.add(`${midX},${midY}`);
+
+  const dirs = [{x:0, y:1}, {x:0, y:-1}, {x:1, y:0}, {x:-1, y:0}];
+
+  while(queue.length > 0) {
+      const curr = queue.shift();
+      reachable.push(curr);
+
+      for(let d of dirs) {
+          const nx = curr.x + d.x;
+          const ny = curr.y + d.y;
+          if (nx >= 0 && ny >= 0 && nx < width && ny < height) {
+              const tile = grid[ny][nx];
+              if (tile.type === 'floor' && !visited.has(`${nx},${ny}`)) {
+                  visited.add(`${nx},${ny}`);
+                  queue.push({x: nx, y: ny});
+              }
+          }
+      }
+  }
+
+  return { grid, reachable };
 };
 
-const generateRoomItems = (width, height, seed) => {
-    const rng = mulberry32(seed + 999);
-    const items = [];
-    if (rng() < 0.3) {
-      const rand = rng();
-      let type = 'pizza';
-      if (rand < 0.4) type = 'pizza';
-      else if (rand < 0.8) type = 'soda';
-      else if (rand < 0.9) type = 'pizzaBox';
-      else type = 'sodaCarrier';
+const pickItemLocation = (rng, reachableTiles) => {
+    if (reachableTiles.length === 0) return null;
+    const idx = getSeededInt(rng, 0, reachableTiles.length - 1);
+    const tile = reachableTiles[idx];
+    reachableTiles.splice(idx, 1); 
+    return tile;
+};
 
-      items.push({
-        id: Math.floor(rng() * 100000),
-        type,
-        x: getSeededInt(rng, 2, width - 2) * TILE_SIZE + 10,
-        y: getSeededInt(rng, 2, height - 2) * TILE_SIZE + 10,
-        w: 24, h: 24
-      });
-    }
-    return items;
-}
-
-const generateBuilding = (levelIndex, theme, rootSeed) => {
-  const buildingSeed = rootSeed + (levelIndex * 777); 
+// ROBUST GRID-BASED GENERATOR
+const generateBuilding = (buildingId, difficulty, theme, rootSeed, assignedSpecialItems) => {
+  const buildingSeed = rootSeed + (buildingId * 777); 
   const rng = mulberry32(buildingSeed);
-  const numRooms = Math.floor(4 + levelIndex * DIFFICULTY_SCALE.roomsMultiplier);
-  const rooms = [];
+  const numRooms = Math.max(2, Math.floor(4 + difficulty * DIFFICULTY_SCALE.roomsMultiplier)); 
   
-  for (let i = 0; i < numRooms; i++) {
-    const roomSeed = Math.floor(rng() * 1000000); 
-    const size = ROOM_VARIANTS[getSeededInt(rng, 0, ROOM_VARIANTS.length - 1)];
-    const doorStyles = {
-        top: getSeededInt(rng, 1, 5),
-        bottom: getSeededInt(rng, 1, 5),
-        left: getSeededInt(rng, 1, 5),
-        right: getSeededInt(rng, 1, 5),
-    };
+  // 1. Grid Phase
+  const roomPositions = [{ id: 0, x: 0, y: 0 }];
+  const occupied = new Map();
+  occupied.set("0,0", 0);
+  const connections = new Set(); 
 
-    rooms.push({
-      id: i,
-      x: 0, y: 0, 
-      width: size.w,
-      height: size.h,
-      doors: { top: null, right: null, bottom: null, left: null },
-      doorStyles, 
-      layout: null, 
-      seed: roomSeed,
-      type: 'normal',
-      cleared: false,
-      explored: false,
-      items: generateRoomItems(size.w, size.h, roomSeed) 
-    });
-  }
-
-  const occupiedPositions = { '0,0': 0 };
-  rooms[0].x = 0;
-  rooms[0].y = 0;
-  const directions = [
-    { x: 0, y: -1, dir: 'top', opp: 'bottom' },
-    { x: 1, y: 0, dir: 'right', opp: 'left' },
-    { x: 0, y: 1, dir: 'bottom', opp: 'top' },
-    { x: -1, y: 0, dir: 'left', opp: 'right' }
-  ];
+  const dirs = [ { x: 0, y: -1 }, { x: 1, y: 0 }, { x: 0, y: 1 }, { x: -1, y: 0 } ];
 
   for (let i = 1; i < numRooms; i++) {
-    const parentId = getSeededInt(rng, 0, i - 1);
-    const parent = rooms[parentId];
-    const validDirs = directions.filter(d => !occupiedPositions[`${parent.x + d.x},${parent.y + d.y}`]);
-    
-    if (validDirs.length > 0) {
-      const move = validDirs[getSeededInt(rng, 0, validDirs.length - 1)];
-      const child = rooms[i];
-      child.x = parent.x + move.x;
-      child.y = parent.y + move.y;
-      parent.doors[move.dir] = child.id;
-      child.doors[move.opp] = parent.id;
-      occupiedPositions[`${child.x},${child.y}`] = child.id;
-    }
+      let placed = false;
+      let attempts = 0;
+      while(attempts < 50 && !placed) {
+          const parentId = getSeededInt(rng, 0, roomPositions.length - 1);
+          const parent = roomPositions[parentId];
+          const validDirs = dirs.filter(d => !occupied.has(`${parent.x + d.x},${parent.y + d.y}`));
+          if (validDirs.length > 0) {
+              const move = validDirs[getSeededInt(rng, 0, validDirs.length - 1)];
+              const newX = parent.x + move.x; const newY = parent.y + move.y;
+              roomPositions.push({ id: i, x: newX, y: newY });
+              occupied.set(`${newX},${newY}`, i);
+              const linkId = parent.id < i ? `${parent.id}-${i}` : `${i}-${parent.id}`;
+              connections.add(linkId);
+              placed = true;
+          }
+          attempts++;
+      }
+      if (!placed) {
+          for(let parent of roomPositions) {
+              const valid = dirs.find(d => !occupied.has(`${parent.x + d.x},${parent.y + d.y}`));
+              if(valid) {
+                  const newX = parent.x + valid.x; const newY = parent.y + valid.y;
+                  roomPositions.push({ id: i, x: newX, y: newY });
+                  occupied.set(`${newX},${newY}`, i);
+                  connections.add(parent.id < i ? `${parent.id}-${i}` : `${i}-${parent.id}`);
+                  placed = true; break;
+              }
+          }
+      }
   }
 
-  rooms[rooms.length - 1].type = 'boss';
-  rooms[rooms.length - 1].items = []; 
+  // 2. Object Phase
+  const roomIdsForItems = roomPositions.map(r => r.id).filter(id => id !== 0 && id !== numRooms - 1);
+  if (roomIdsForItems.length === 0) roomIdsForItems.push(0);
+
+  const rooms = roomPositions.map(pos => {
+      const roomSeed = Math.floor(rng() * 1000000); 
+      const size = ROOM_VARIANTS[getSeededInt(rng, 0, ROOM_VARIANTS.length - 1)];
+      
+      const doors = { top: null, right: null, bottom: null, left: null };
+      
+      const myConns = Array.from(connections).filter(c => c.startsWith(`${pos.id}-`) || c.endsWith(`-${pos.id}`));
+      myConns.forEach(conn => {
+          const otherId = conn.split('-').find(id => Number(id) !== pos.id);
+          const otherPos = roomPositions.find(p => p.id === Number(otherId));
+          if (otherPos.y < pos.y) doors.top = otherPos.id;
+          if (otherPos.y > pos.y) doors.bottom = otherPos.id;
+          if (otherPos.x < pos.x) doors.left = otherPos.id;
+          if (otherPos.x > pos.x) doors.right = otherPos.id;
+      });
+
+      const isBoss = (pos.id === numRooms - 1);
+      
+      const layoutData = generateRoomLayout(size.w, size.h, roomSeed, doors, isBoss);
+      const reachable = layoutData.reachable;
+
+      const items = [];
+      const itemRng = mulberry32(roomSeed + 999);
+
+      // A. Special Items
+      if (assignedSpecialItems.length > 0 && roomIdsForItems.includes(pos.id)) {
+          if (itemRng() < 0.5 || roomIdsForItems.length <= assignedSpecialItems.length) { 
+             const specialType = assignedSpecialItems.pop();
+             const spot = pickItemLocation(itemRng, reachable);
+             if (spot) items.push({ id: Math.floor(itemRng()*100000), type: specialType, x: spot.x * TILE_SIZE + 12, y: spot.y * TILE_SIZE + 12, w: 24, h: 24, isUnlimited: false });
+          }
+      }
+
+      // B. Random Consumables (Unlimited)
+      if (!isBoss && itemRng() < 0.3) {
+          const spot = pickItemLocation(itemRng, reachable);
+          if (spot) {
+              const rand = itemRng();
+              const type = rand < 0.5 ? 'pizza' : 'soda';
+              // Note: IDs are deterministic, so we can track them
+              items.push({ id: Math.floor(itemRng()*100000), type, x: spot.x * TILE_SIZE + 12, y: spot.y * TILE_SIZE + 12, w: 24, h: 24, isUnlimited: true });
+          }
+      }
+
+      return {
+          id: pos.id,
+          x: pos.x, y: pos.y,
+          width: size.w, height: size.h,
+          doors,
+          doorStyles: {
+            top: getSeededInt(rng, 1, 5), bottom: getSeededInt(rng, 1, 5),
+            left: getSeededInt(rng, 1, 5), right: getSeededInt(rng, 1, 5),
+          },
+          layout: layoutData, 
+          seed: roomSeed,
+          type: isBoss ? 'boss' : 'normal',
+          cleared: false,
+          explored: false,
+          items
+      };
+  });
+
   return { rooms, startRoomId: 0, theme };
 };
 
@@ -282,22 +427,28 @@ const VirtualJoystick = ({ onMove }) => {
 };
 
 export default function App() {
-  const [gameState, setGameState] = useState('START'); // Start at START screen
+  const [gameState, setGameState] = useState('START'); 
   const [selectedChar, setSelectedChar] = useState(CHARACTERS[0]);
   const [worldMap, setWorldMap] = useState([]);
   const [currentBuildingId, setCurrentBuildingId] = useState(0);
-  const [playerStats, setPlayerStats] = useState({ hp: 3, maxHp: 3, mp: 3, maxMp: 3, score: 0 });
+  const [playerStats, setPlayerStats] = useState({ 
+      hp: 3, maxHp: 3, mp: 3, maxMp: 3, score: 0, speed: 4, damage: 1,
+      keys: 0, files: 0
+  });
   const [activeRoomId, setActiveRoomId] = useState(0);
   const [rootSeed, setRootSeed] = useState(Date.now());
   const [highScore, setHighScore] = useState(0);
-  // State to force re-render when start bg loads
   const [startBgLoaded, setStartBgLoaded] = useState(false);
+  const [endingPage, setEndingPage] = useState(0);
+  const [messageData, setMessageData] = useState(null); // { title, text, nextState }
 
   const canvasRef = useRef(null);
   const requestRef = useRef();
   
   const assets = useRef({}); 
   const assetStatus = useRef({});
+  // Store IDs of all collected items to prevent regeneration
+  const collectedItemsRef = useRef(new Set());
 
   const gameData = useRef({
     player: { x: 0, y: 0, vx: 0, vy: 0, cooldown: 0, bombCooldown: 0, facing: {x:1, y:0}, frameIndex: 0, frameTimer: 0, state: 'idle' },
@@ -352,7 +503,6 @@ export default function App() {
             assets.current[key] = c;
             assetStatus.current[key] = 'loaded';
             
-            // Special trigger for start background
             if (key === 'bg_start') {
                 setStartBgLoaded(true);
             }
@@ -379,12 +529,9 @@ export default function App() {
       return null;
   };
 
-  const playSound = (type) => { /* console.log(`Playing sound: ${type}`); */ };
-
   // --- INITIALIZATION ---
 
   useEffect(() => {
-      // Load start screen background immediately on mount
       loadImage('bg_start', './assets/bg_start_screen.png');
   }, []);
 
@@ -395,12 +542,14 @@ export default function App() {
   const startGame = () => {
     const seed = Date.now();
     setRootSeed(seed);
-    const map = generateWorldMap();
+    collectedItemsRef.current = new Set(); // Reset collected items
+    const map = generateWorldMap(); 
     setWorldMap(map);
     setPlayerStats({ 
         hp: selectedChar.maxHp, maxHp: selectedChar.maxHp, 
         mp: selectedChar.maxMp, maxMp: selectedChar.maxMp,
-        score: 0 
+        speed: selectedChar.speed, damage: selectedChar.damage,
+        keys: 0, files: 0, score: 0 
     });
     setGameState('MAP');
     
@@ -421,7 +570,16 @@ export default function App() {
     setCurrentBuildingId(buildingId);
     const buildingNode = worldMap.find(b => b.id === buildingId);
     const theme = buildingNode ? buildingNode.theme : 'dungeon';
-    const building = generateBuilding(buildingId, theme, rootSeed);
+    const difficulty = buildingNode.id === HIDDEN_BUILDING_ID ? 5 : buildingNode.column; // Hidden is hard
+    
+    // Generate building deterministically
+    const building = generateBuilding(buildingId, difficulty, theme, rootSeed, [...buildingNode.specialItems]); 
+    
+    // Filter out already collected items (Global Persistence)
+    building.rooms.forEach(room => {
+        room.items = room.items.filter(item => !collectedItemsRef.current.has(item.id));
+    });
+
     gameData.current.building = building;
     setActiveRoomId(building.startRoomId);
     
@@ -437,7 +595,6 @@ export default function App() {
     }
 
     const startRoom = building.rooms.find(r => r.id === building.startRoomId);
-    // STUCK FIX: Center the player perfectly in the tile grid
     gameData.current.player.x = (Math.floor(startRoom.width / 2) * TILE_SIZE) + (TILE_SIZE - PLAYER_SIZE) / 2;
     gameData.current.player.y = (Math.floor(startRoom.height / 2) * TILE_SIZE) + (TILE_SIZE - PLAYER_SIZE) / 2;
     gameData.current.projectiles = [];
@@ -451,11 +608,12 @@ export default function App() {
   const setupRoom = (roomId, buildingData) => {
     const room = buildingData.rooms.find(r => r.id === roomId);
     room.explored = true;
-    room.layout = generateRoomLayout(room.width, room.height, room.seed);
+    
     gameData.current.enemies = [];
     gameData.current.items = [...room.items]; 
 
-    const difficulty = currentBuildingId;
+    const buildingNode = worldMap.find(b => b.id === currentBuildingId);
+    const difficulty = buildingNode.id === HIDDEN_BUILDING_ID ? 5 : buildingNode.column;
     const isStartRoom = roomId === buildingData.startRoomId && difficulty === 0;
 
     if (!room.cleared && !isStartRoom && room.type !== 'boss') {
@@ -470,6 +628,9 @@ export default function App() {
                 if (dist > 150) valid = true;
            }
         }
+        
+        const moveSpeed = (1.0 + difficulty * 0.25) * DIFFICULTY_SCALE.enemySpeedBase;
+
         gameData.current.enemies.push({
           x: ex, y: ey,
           w: 32, h: 32,
@@ -479,7 +640,7 @@ export default function App() {
           timer: 0,
           frameIndex: 0,
           frameTimer: 0,
-          speed: (1.5 + difficulty * 0.1) * DIFFICULTY_SCALE.enemySpeedBase,
+          speed: moveSpeed,
           color: COLORS.enemy
         });
       }
@@ -496,7 +657,7 @@ export default function App() {
     const currentRoom = building.rooms.find(r => r.id === activeRoomId);
     
     // Player
-    const speed = selectedChar.speed;
+    const speed = playerStats.speed;
     const nextX = g.player.x + g.input.x * speed;
     const nextY = g.player.y + g.input.y * speed;
 
@@ -538,7 +699,7 @@ export default function App() {
         life: 60 
       });
       g.player.cooldown = selectedChar.fireRate / (1000/60);
-      playSound('shoot');
+      // playSound('shoot'); 
     }
     if (g.player.cooldown > 0) g.player.cooldown--;
 
@@ -548,7 +709,7 @@ export default function App() {
             setPlayerStats(prev => ({...prev, mp: prev.mp - BOMB_COST}));
             g.player.bombCooldown = 60; 
             g.shockwaves.push({ x: g.player.x + 16, y: g.player.y + 16, r: 10, maxR: 500, alpha: 1.0 });
-            playSound('explosion');
+            // playSound('explosion');
             g.enemies.forEach(e => {
                 e.hp -= 2;
                 e.state = 'STUNNED';
@@ -573,7 +734,9 @@ export default function App() {
       if (checkWallCollision(p.x, p.y, currentRoom)) p.life = 0;
       g.enemies.forEach(e => {
         if (checkCollision({x: p.x, y: p.y, w: 10, h: 10}, e)) {
-          e.state = 'STUNNED'; e.timer = 60; e.hp -= 1; p.life = 0;
+          e.state = 'STUNNED'; e.timer = 60; 
+          e.hp -= playerStats.damage; // Use player damage stats
+          p.life = 0;
           createParticles(e.x, e.y, COLORS.enemy);
         }
       });
@@ -628,11 +791,21 @@ export default function App() {
                 }
             } else if (item.type === 'sodaCarrier') {
                 setPlayerStats(prev => ({ ...prev, maxMp: prev.maxMp + 1, mp: prev.mp + 1 })); consumed = true;
+            } else if (item.type === 'rollerSkates') {
+                setPlayerStats(prev => ({ ...prev, speed: prev.speed + 1 })); consumed = true;
+            } else if (item.type === 'cookieBag') {
+                setPlayerStats(prev => ({ ...prev, damage: prev.damage + 1 })); consumed = true;
+            } else if (item.type === 'file') {
+                setPlayerStats(prev => ({ ...prev, files: prev.files + 1 })); consumed = true;
+            } else if (item.type === 'key') {
+                setPlayerStats(prev => ({ ...prev, keys: prev.keys + 1 })); consumed = true;
             }
 
             if (consumed) {
-                createParticles(item.x, item.y, item.type.includes('soda') ? COLORS.soda : COLORS.pizza);
-                playSound('powerup');
+                createParticles(item.x, item.y, COLORS[item.type] || COLORS.pizza);
+                // Add to global collection (persistence)
+                collectedItemsRef.current.add(item.id);
+                // Remove locally
                 const persistentRoom = g.building.rooms.find(r => r.id === activeRoomId);
                 if (persistentRoom && persistentRoom.items) {
                     persistentRoom.items = persistentRoom.items.filter(i => i.id !== item.id);
@@ -657,7 +830,7 @@ export default function App() {
           return { ...prev, hp: newHp };
       });
       createParticles(gameData.current.player.x, gameData.current.player.y, '#ff0000');
-      playSound('hit');
+      // playSound('hit');
       gameData.current.player.x -= gameData.current.player.facing.x * 50;
       gameData.current.player.y -= gameData.current.player.facing.y * 50;
   };
@@ -676,17 +849,11 @@ export default function App() {
            if (dir === 'right' && gridX === room.width-1 && gridY === Math.floor(room.height/2)) return true;
            return false;
         });
+        
         if (room.type === 'boss') {
-           const midX = Math.floor(room.width/2);
-           const midY = Math.floor(room.height/2);
-           let bossDir = 'top';
-           if (room.doors.top !== null) bossDir = 'right';
-           if (bossDir === 'right' && room.doors.right !== null) bossDir = 'bottom';
-           if (bossDir === 'bottom' && room.doors.bottom !== null) bossDir = 'left';
-           if (bossDir === 'top' && gridY === 0 && gridX === midX) return false;
-           if (bossDir === 'right' && gridX === room.width-1 && gridY === midY) return false;
-           if (bossDir === 'bottom' && gridY === room.height-1 && gridX === midX) return false;
-           if (bossDir === 'left' && gridX === 0 && gridY === midY) return false;
+           // Boss door offset logic: Top wall, midX + 2
+           const bossDoorX = Math.floor(room.width/2) + 2;
+           if (gridY === 0 && gridX === bossDoorX) return false;
         }
         return !isDoor;
     }
@@ -696,20 +863,17 @@ export default function App() {
   const checkDoorCollision = (x, y, room) => {
       const cx = x + 16; const cy = y + 16;
       const midX = (room.width * TILE_SIZE) / 2;
-      const midY = (room.height * TILE_SIZE) / 2;
-      if (room.doors.top !== null && cy < TILE_SIZE) return 'top';
-      if (room.doors.bottom !== null && cy > (room.height-1)*TILE_SIZE) return 'bottom';
+      
+      // Standard Doors
+      if (room.doors.top !== null && cy < TILE_SIZE && Math.abs(cx - midX) < TILE_SIZE) return 'top';
+      if (room.doors.bottom !== null && cy > (room.height-1)*TILE_SIZE && Math.abs(cx - midX) < TILE_SIZE) return 'bottom';
       if (room.doors.left !== null && cx < TILE_SIZE) return 'left';
       if (room.doors.right !== null && cx > (room.width-1)*TILE_SIZE) return 'right';
+
       if (room.type === 'boss') {
-          let bossDir = 'top';
-          if (room.doors.top !== null) bossDir = 'right';
-          if (bossDir === 'right' && room.doors.right !== null) bossDir = 'bottom';
-          if (bossDir === 'bottom' && room.doors.bottom !== null) bossDir = 'left';
-          if (bossDir === 'top' && cy < TILE_SIZE && Math.abs(cx - midX) < TILE_SIZE) return 'boss';
-          if (bossDir === 'right' && cx > (room.width-1)*TILE_SIZE && Math.abs(cy - midY) < TILE_SIZE) return 'boss';
-          if (bossDir === 'bottom' && cy > (room.height-1)*TILE_SIZE && Math.abs(cx - midX) < TILE_SIZE) return 'boss';
-          if (bossDir === 'left' && cx < TILE_SIZE && Math.abs(cy - midY) < TILE_SIZE) return 'boss';
+          // Boss Exit: Top Wall, Offset +2
+          const bossDoorPixelX = (Math.floor(room.width/2) + 2) * TILE_SIZE + (TILE_SIZE/2);
+          if (cy < TILE_SIZE && Math.abs(cx - bossDoorPixelX) < TILE_SIZE) return 'boss';
       }
       return null;
   };
@@ -759,11 +923,65 @@ export default function App() {
   };
 
   const completeLevel = () => {
-    const nextId = currentBuildingId + 1;
-    const newMap = [...worldMap];
-    newMap[currentBuildingId].cleared = true;
-    if (nextId < newMap.length) { newMap[nextId].locked = false; setWorldMap(newMap); setGameState('MAP'); }
-    else { saveScore(playerStats.score); setGameState('VICTORY'); }
+    // Current building completed
+    const currentBuilding = worldMap.find(b => b.id === currentBuildingId);
+    
+    // Logic: Clear current, unlock all buildings in NEXT column
+    const nextCol = currentBuilding.column + 1;
+    let maxCol = 0;
+    
+    // Calculate max column first to ensure reliability
+    worldMap.forEach(b => {
+        if (b.column > maxCol) maxCol = b.column;
+    });
+    
+    const newMap = worldMap.map(b => {
+        if (b.id === currentBuildingId) {
+            return { ...b, cleared: true };
+        }
+        // Don't auto-unlock hidden building via column progression
+        if (b.column === nextCol && b.id !== HIDDEN_BUILDING_ID) {
+            return { ...b, locked: false };
+        }
+        return b;
+    });
+
+    // 1. FIRST BUILDING SPECIAL MESSAGE & UNLOCK HIDDEN
+    if (currentBuilding.id === 0) {
+        const hasKey = playerStats.keys > 0;
+        
+        // If have key, also unlock hidden building in new map
+        if (hasKey) {
+            const hiddenIndex = newMap.findIndex(b => b.id === HIDDEN_BUILDING_ID);
+            if (hiddenIndex !== -1) {
+                newMap[hiddenIndex].locked = false;
+                newMap[hiddenIndex].hidden = false;
+            }
+        }
+
+        setWorldMap(newMap);
+        setMessageData({
+            title: hasKey ? "Hidden Path Revealed" : "Escaped!",
+            text: hasKey 
+                ? "Now you have the key, you can release all the kids!"
+                : "You escaped from the building, you are the only hope of the kids in the building.",
+            nextState: 'MAP'
+        });
+        setGameState('MESSAGE');
+        return;
+    }
+
+    setWorldMap(newMap);
+
+    // 2. ENDING LOGIC
+    // If we just cleared the Final Column (Column 4)
+    if (currentBuilding.column === maxCol) {
+        saveScore(playerStats.score);
+        setEndingPage(0);
+        setGameState('ENDING');
+    } else {
+        setGameState('MAP'); 
+    }
   };
 
   // --- RENDERING ---
@@ -817,30 +1035,41 @@ export default function App() {
     if (room.doors.bottom !== null) drawDoor(midX, (room.height-1)*TILE_SIZE, 'bottom', false);
     if (room.doors.left !== null) drawDoor(0, midY, 'left', false);
     if (room.doors.right !== null) drawDoor((room.width-1)*TILE_SIZE, midY, 'right', false);
+    
     if (room.type === 'boss') {
-        let bossDir = 'top';
-        if (room.doors.top !== null) bossDir = 'right';
-        if (bossDir === 'right' && room.doors.right !== null) bossDir = 'bottom';
-        if (bossDir === 'bottom' && room.doors.bottom !== null) bossDir = 'left';
-        if (bossDir === 'top') drawDoor(midX, 0, 'top', true);
-        else if (bossDir === 'right') drawDoor((room.width-1)*TILE_SIZE, midY, 'right', true);
-        else if (bossDir === 'bottom') drawDoor(midX, (room.height-1)*TILE_SIZE, 'bottom', true);
-        else if (bossDir === 'left') drawDoor(0, midY, 'left', true);
+        // Boss Door at Top, Offset +2
+        const bossDoorX = (Math.floor(room.width/2) + 2) * TILE_SIZE;
+        drawDoor(bossDoorX, 0, 'top', true);
     }
 
     // Items
     g.items.forEach(item => {
         let color = COLORS.pizza;
         if (item.type === 'pizzaBox') color = COLORS.pizzaBox;
-        if (item.type === 'soda') color = COLORS.soda;
-        if (item.type === 'sodaCarrier') color = COLORS.sodaCarrier;
-        ctx.fillStyle = color; ctx.fillRect(item.x, item.y, item.w, item.h);
-        ctx.fillStyle = 'white'; ctx.font = '10px sans-serif';
-        let label = 'HP';
+        else if (item.type === 'soda') color = COLORS.soda;
+        else if (item.type === 'sodaCarrier') color = COLORS.sodaCarrier;
+        else if (item.type === 'rollerSkates') color = COLORS.rollerSkates;
+        else if (item.type === 'cookieBag') color = COLORS.cookieBag;
+        else if (item.type === 'file') color = COLORS.file;
+        else if (item.type === 'key') color = COLORS.key;
+        
+        // Draw Item Body
+        ctx.fillStyle = color; 
+        ctx.fillRect(item.x, item.y, item.w, item.h);
+        
+        // Simple Icon/Text overlay
+        ctx.fillStyle = 'white'; 
+        ctx.font = '10px sans-serif';
+        let label = '';
         if(item.type === 'pizzaBox') label = '+HP';
-        if(item.type === 'soda') label = 'MP';
-        if(item.type === 'sodaCarrier') label = '+MP';
-        ctx.fillText(label, item.x, item.y - 5);
+        else if(item.type === 'soda') label = 'MP';
+        else if(item.type === 'sodaCarrier') label = '+MP';
+        else if(item.type === 'rollerSkates') label = 'SPD';
+        else if(item.type === 'cookieBag') label = 'DMG';
+        else if(item.type === 'file') label = 'FILE';
+        else if(item.type === 'key') label = 'KEY';
+        
+        if (label) ctx.fillText(label, item.x, item.y - 5);
     });
 
     // Enemies
@@ -973,6 +1202,87 @@ export default function App() {
   const handleFireBtn = (active) => { gameData.current.input.fire = active; };
   const handleBombBtn = (active) => { gameData.current.input.bomb = active; };
 
+  // --- ENDING SEQUENCE ---
+  const getEndingContent = () => {
+      const hiddenCleared = worldMap.find(b => b.id === HIDDEN_BUILDING_ID)?.cleared;
+      const allFiles = playerStats.files >= 5;
+      const hasKey = playerStats.keys > 0;
+
+      // Page 1: Base Escape (Always shown first)
+      if (endingPage === 0) {
+          return {
+              title: hasKey ? "Escaped Together" : "Escaped Alone",
+              text: hasKey 
+                  ? "You find your friend on the dockyard, you have the key, and you released your friends. Together, you successfully escaped." 
+                  : "You find the boat to leave the island, your friend is locked in a cage on the dockyard. Your friend tried to make noise to attract the focus of the guards and you successfully escaped.",
+              next: hiddenCleared
+          };
+      }
+      
+      // Page 2: Hidden Level (Only if hidden cleared)
+      if (endingPage === 1 && hiddenCleared) {
+          return {
+              title: "Savior",
+              text: "By clearing the hidden dungeon, you released all the trapped kids!",
+              next: true // Go to page 3 logic
+          };
+      }
+
+      // Page 3: Truth (Always shown)
+      // Note: Logic allows skipping Page 2 if not cleared
+      if ((endingPage === 2 && hiddenCleared) || (endingPage === 1 && !hiddenCleared)) {
+          return {
+              title: allFiles ? "Truth Exposed" : "Island Remains",
+              text: allFiles
+                  ? "With the collected files, you exposed the island to the media. Police raid incoming!"
+                  : "You survived, but without evidence, the island's dark experiments continue.",
+              next: hiddenCleared && allFiles // Only go to page 4 if BOTH conditions met
+          };
+      }
+
+      // Page 4: Nobel Prize (Ultimate ending)
+      if (hiddenCleared && allFiles) {
+          return {
+              title: "Nobel Peace Prize",
+              text: "Your extraordinary bravery and complete exposure of the operation earned you the Nobel Peace Prize!",
+              next: false
+          };
+      }
+
+      return null;
+  };
+
+  const renderEnding = () => {
+      const content = getEndingContent();
+      if (!content) return null;
+
+      return (
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/95 z-50 text-center px-8">
+            <h2 className="text-5xl font-bold text-yellow-400 mb-6">{content.title}</h2>
+            <p className="text-2xl text-white mb-12 max-w-3xl leading-relaxed">{content.text}</p>
+            <button 
+                onClick={() => {
+                    if (content.next) {
+                        setEndingPage(prev => prev + (endingPage === 1 && !worldMap.find(b => b.id === HIDDEN_BUILDING_ID)?.cleared ? 2 : 1)); // Skip p2 if needed logic is handled in getEndingContent roughly but state needs increment
+                        // Actually easier: just increment, let getEndingContent handle the logic mapping based on current index?
+                        // My getEndingContent logic uses specific indices.
+                        // Let's simple increment state, but handle skipping inside the render logic call
+                        let nextVal = endingPage + 1;
+                        const hiddenCleared = worldMap.find(b => b.id === HIDDEN_BUILDING_ID)?.cleared;
+                        if (endingPage === 0 && !hiddenCleared) nextVal = 2; // Skip to page 3 (Truth) logic index
+                        setEndingPage(nextVal);
+                    } else {
+                        setGameState('START');
+                    }
+                }}
+                className="px-8 py-4 bg-white text-black font-bold rounded-full hover:bg-gray-200 flex items-center gap-2"
+            >
+                {content.next ? <><ArrowRight /> Next</> : <><RotateCcw /> Return to Title</>}
+            </button>
+        </div>
+      );
+  };
+
   return (
     <div className="w-full h-screen bg-slate-900 overflow-hidden relative select-none touch-none text-white font-sans">
       <canvas ref={canvasRef} className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-black shadow-2xl" style={{ maxWidth: '100%', maxHeight: '100%', width: 'auto', height: 'auto', imageRendering: 'pixelated' }} />
@@ -985,13 +1295,7 @@ export default function App() {
              }}>
             <div className="bg-black/60 p-8 rounded-2xl backdrop-blur-md max-w-2xl w-full">
                 <h1 className="text-5xl md:text-7xl font-black mb-6 text-yellow-400 tracking-wider drop-shadow-lg">ESCAPE THE ISLAND</h1>
-                
-                {highScore > 0 && (
-                    <div className="flex items-center justify-center gap-2 text-yellow-200 mb-8 text-xl font-bold bg-white/10 py-2 rounded-lg">
-                        <Trophy className="text-yellow-400" /> High Score: {highScore}
-                    </div>
-                )}
-
+                {highScore > 0 && <div className="flex items-center justify-center gap-2 text-yellow-200 mb-8 text-xl font-bold bg-white/10 py-2 rounded-lg"><Trophy className="text-yellow-400" /> High Score: {highScore}</div>}
                 <div className="bg-gray-800/80 p-6 rounded-xl text-left mb-8 border border-gray-600">
                     <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2"><Info size={20} /> How to Play</h3>
                     <ul className="space-y-2 text-gray-300 text-sm">
@@ -1001,11 +1305,7 @@ export default function App() {
                         <li>• <strong>Goal:</strong> Find the exit door in each building. Survive 6 levels.</li>
                     </ul>
                 </div>
-
-                <button 
-                    onClick={initGameSession}
-                    className="w-full px-8 py-5 bg-gradient-to-r from-yellow-600 to-yellow-500 hover:from-yellow-500 hover:to-yellow-400 text-black font-black text-2xl rounded-xl shadow-lg transform transition-all hover:scale-105 active:scale-95 flex items-center justify-center gap-3"
-                >
+                <button onClick={initGameSession} className="w-full px-8 py-5 bg-gradient-to-r from-yellow-600 to-yellow-500 hover:from-yellow-500 hover:to-yellow-400 text-black font-black text-2xl rounded-xl shadow-lg transform transition-all hover:scale-105 active:scale-95 flex items-center justify-center gap-3">
                     <Play fill="black" size={32} /> START NEW GAME
                 </button>
             </div>
@@ -1028,31 +1328,20 @@ export default function App() {
                 </div>
             </div>
             <div className="absolute top-4 right-4 text-xl font-bold text-yellow-400">Score: {playerStats.score}</div>
-            
+            <div className="absolute bottom-4 left-4 flex flex-col gap-1 bg-black/50 p-2 rounded text-white text-xs">
+                <div className="flex items-center gap-1"><Wind size={14} /> Speed: {playerStats.speed}</div>
+                <div className="flex items-center gap-1"><Briefcase size={14} /> Power: {playerStats.damage}</div>
+                <div className="flex items-center gap-1"><Key size={14} /> Keys: {playerStats.keys}</div>
+                <div className="flex items-center gap-1"><FileText size={14} /> Files: {playerStats.files}/5</div>
+            </div>
             <div className="lg:hidden">
                 <VirtualJoystick onMove={handleJoystick} />
                 <div className="absolute bottom-10 right-10 flex gap-4">
-                    {/* Bomb Button */}
-                    <button 
-                        className={`w-20 h-20 rounded-full border-4 flex items-center justify-center backdrop-blur-sm ${playerStats.mp >= BOMB_COST ? 'bg-purple-500/50 border-purple-400 active:bg-purple-500/80' : 'bg-gray-700/50 border-gray-600 grayscale'}`}
-                        onTouchStart={() => handleBombBtn(true)} onTouchEnd={() => handleBombBtn(false)}
-                        onMouseDown={() => handleBombBtn(true)} onMouseUp={() => handleBombBtn(false)}
-                    >
-                        <Bomb size={32} />
-                    </button>
-                    {/* Fire Button */}
-                    <button 
-                        className="w-24 h-24 rounded-full bg-red-500/50 border-4 border-red-400 active:bg-red-500/80 flex items-center justify-center backdrop-blur-sm"
-                        onTouchStart={() => handleFireBtn(true)} onTouchEnd={() => handleFireBtn(false)}
-                        onMouseDown={() => handleFireBtn(true)} onMouseUp={() => handleFireBtn(false)}
-                    >
-                        <Crosshair size={40} />
-                    </button>
+                    <button className={`w-20 h-20 rounded-full border-4 flex items-center justify-center backdrop-blur-sm ${playerStats.mp >= BOMB_COST ? 'bg-purple-500/50 border-purple-400 active:bg-purple-500/80' : 'bg-gray-700/50 border-gray-600 grayscale'}`} onTouchStart={() => handleBombBtn(true)} onTouchEnd={() => handleBombBtn(false)} onMouseDown={() => handleBombBtn(true)} onMouseUp={() => handleBombBtn(false)}><Bomb size={32} /></button>
+                    <button className="w-24 h-24 rounded-full bg-red-500/50 border-4 border-red-400 active:bg-red-500/80 flex items-center justify-center backdrop-blur-sm" onTouchStart={() => handleFireBtn(true)} onTouchEnd={() => handleFireBtn(false)} onMouseDown={() => handleFireBtn(true)} onMouseUp={() => handleFireBtn(false)}><Crosshair size={40} /></button>
                 </div>
             </div>
-            <div className="hidden lg:block absolute bottom-4 left-1/2 -translate-x-1/2 text-gray-400 text-sm">
-                WASD to Move | Space to Fire | B to Bomb (Costs {BOMB_COST} MP)
-            </div>
+            <div className="hidden lg:block absolute bottom-4 left-1/2 -translate-x-1/2 text-gray-400 text-sm">WASD to Move | Space to Fire | B to Bomb (Costs {BOMB_COST} MP)</div>
         </>
       )}
 
@@ -1062,15 +1351,8 @@ export default function App() {
             <h2 className="text-4xl font-bold mb-8 text-white">Select Your Hero</h2>
             <div className="flex flex-col md:flex-row gap-6 mb-12">
                 {CHARACTERS.map(char => (
-                    <div 
-                        key={char.id}
-                        onClick={() => setSelectedChar(char)}
-                        className={`p-6 rounded-xl border-2 cursor-pointer transition-all ${selectedChar.id === char.id ? 'border-yellow-400 bg-white/10 scale-105' : 'border-gray-600 bg-white/5 hover:bg-white/10'}`}
-                    >
-                        <div className="flex items-center gap-3 mb-2">
-                            <div className="w-8 h-8 rounded" style={{background: char.color}}></div>
-                            <h3 className="text-xl font-bold text-white">{char.name}</h3>
-                        </div>
+                    <div key={char.id} onClick={() => setSelectedChar(char)} className={`p-6 rounded-xl border-2 cursor-pointer transition-all ${selectedChar.id === char.id ? 'border-yellow-400 bg-white/10 scale-105' : 'border-gray-600 bg-white/5 hover:bg-white/10'}`}>
+                        <div className="flex items-center gap-3 mb-2"><div className="w-8 h-8 rounded" style={{background: char.color}}></div><h3 className="text-xl font-bold text-white">{char.name}</h3></div>
                         <p className="text-gray-400 text-sm mb-4">{char.description}</p>
                         <div className="space-y-2 text-xs text-gray-300">
                             <div className="flex justify-between"><span>Speed</span> <div className="w-20 bg-gray-700 h-2 rounded"><div className="bg-green-500 h-full rounded" style={{width: `${(char.speed/6)*100}%`}}></div></div></div>
@@ -1080,59 +1362,98 @@ export default function App() {
                     </div>
                 ))}
             </div>
-            <button 
-                onClick={startGame}
-                className="px-8 py-4 bg-green-600 hover:bg-green-500 text-white font-bold text-xl rounded-full shadow-lg flex items-center gap-2 transition-transform hover:scale-110"
-            >
-                <Play fill="white" /> ENTER ISLAND
-            </button>
+            <button onClick={startGame} className="px-8 py-4 bg-green-600 hover:bg-green-500 text-white font-bold text-xl rounded-full shadow-lg flex items-center gap-2 transition-transform hover:scale-110"><Play fill="white" /> ENTER ISLAND</button>
         </div>
       )}
 
       {/* --- MAP --- */}
       {gameState === 'MAP' && (
-        <div className="absolute inset-0 bg-slate-800 z-40 overflow-hidden">
-             <div className="absolute top-0 left-0 w-full p-4 bg-black/50 backdrop-blur text-center">
-                 <h2 className="text-2xl font-bold">Island Map</h2>
+        <div className="absolute inset-0 bg-slate-800 z-40 overflow-hidden flex flex-col">
+             <div className="w-full p-4 bg-black/50 backdrop-blur text-center shrink-0 z-10">
+                 <h2 className="text-2xl font-bold text-white">Island Map</h2>
                  <p className="text-gray-400">Select the next building to explore</p>
              </div>
-             <div className="relative w-full h-full flex items-center overflow-x-auto px-10">
-                 <div className="absolute top-1/2 left-0 h-2 bg-gray-700 w-[1000px] -translate-y-1/2 z-0" />
-                 {worldMap.map((node, index) => (
-                     <div key={node.id} className="relative z-10 flex flex-col items-center mx-10 shrink-0">
-                         <button
-                            disabled={node.locked || node.cleared}
-                            onClick={() => enterBuilding(node.id)}
-                            className={`w-24 h-24 rounded-full border-4 flex items-center justify-center transition-all 
-                                ${node.cleared ? 'bg-green-600 border-green-400' : 
-                                  node.locked ? 'bg-gray-700 border-gray-600 grayscale cursor-not-allowed' : 
-                                  'bg-blue-600 border-blue-400 animate-pulse cursor-pointer shadow-blue-500/50 shadow-lg'}`}
-                         >
-                             {node.cleared ? <Zap size={40} /> : <MapIcon size={32} />}
-                         </button>
-                         <div className="mt-4 bg-black/50 px-3 py-1 rounded text-center">
-                             Building {node.level}
-                             <div className="text-xs text-gray-300 uppercase tracking-widest">{node.theme.replace('_', ' ')}</div>
-                             {node.locked && <span className="text-red-500 text-xs">LOCKED</span>}
-                             {node.cleared && <span className="text-green-500 text-xs">CLEARED</span>}
+             
+             {/* Render Columns */}
+             <div className="flex-1 overflow-x-auto flex items-center justify-start px-20 gap-16">
+                 {(() => {
+                     // Group buildings by column
+                     const minCol = Math.min(...worldMap.map(b => b.column));
+                     const maxCol = Math.max(...worldMap.map(b => b.column));
+                     const cols = [];
+                     // Include hidden column (-1) if it exists
+                     for(let i=minCol; i<=maxCol; i++) cols.push(worldMap.filter(b => b.column === i));
+                     
+                     return cols.map((colBuildings, colIdxOffset) => {
+                         const colIdx = minCol + colIdxOffset;
+                         return (
+                         <div key={colIdx} className="flex flex-col items-center gap-8 relative">
+                             {/* Connector Line to Next Column */}
+                             {colIdx >= 0 && colIdx < maxCol && (
+                                 <div className="absolute top-1/2 left-full w-16 h-1 bg-gray-600 -translate-y-1/2 z-0" />
+                             )}
+                             {/* Hidden Column Connector (Dashed line to Start) */}
+                             {colIdx === -1 && (
+                                 <div className="absolute top-1/2 left-full w-16 h-1 border-t-4 border-dashed border-gray-700 -translate-y-1/2 z-0" />
+                             )}
+                             
+                             {colBuildings.map(node => {
+                                 // Don't render hidden nodes if they are still hidden
+                                 if (node.hidden) return null;
+
+                                 return (
+                                 <div key={node.id} className="relative z-10 flex flex-col items-center">
+                                     <button
+                                        disabled={node.locked}
+                                        onClick={() => enterBuilding(node.id)}
+                                        className={`w-24 h-24 rounded-full border-4 flex items-center justify-center transition-all relative
+                                            ${node.cleared ? 'bg-green-600 border-green-400 ring-4 ring-green-900/50' : 
+                                              node.locked ? 'bg-gray-700 border-gray-600 grayscale cursor-not-allowed opacity-50' : 
+                                              'bg-blue-600 border-blue-400 animate-pulse cursor-pointer shadow-blue-500/50 shadow-lg hover:scale-110'}`}
+                                     >
+                                         {node.id === HIDDEN_BUILDING_ID ? <Lock size={32} /> : (node.cleared ? <Zap size={40} /> : <MapIcon size={32} />)}
+                                         {/* Checkmark for re-entry clarity */}
+                                         {node.cleared && <div className="absolute -bottom-2 -right-2 bg-green-400 text-black rounded-full p-1 border-2 border-white"><RotateCcw size={14} /></div>}
+                                     </button>
+                                     <div className="mt-2 bg-black/70 px-3 py-1 rounded text-center backdrop-blur-sm border border-gray-700">
+                                         <div className="text-white font-bold">{node.id === HIDDEN_BUILDING_ID ? "???" : `Lvl ${node.level}`}</div>
+                                         <div className="text-[10px] text-gray-300 uppercase tracking-widest">{node.theme.replace('_', ' ')}</div>
+                                     </div>
+                                 </div>
+                                )
+                             })}
                          </div>
-                     </div>
-                 ))}
+                     )});
+                 })()}
              </div>
         </div>
       )}
 
-      {/* --- GAME OVER / VICTORY --- */}
-      {(gameState === 'GAMEOVER' || gameState === 'VICTORY') && (
-        <div className={`absolute inset-0 z-50 flex flex-col items-center justify-center ${gameState === 'GAMEOVER' ? 'bg-red-900/90' : 'bg-yellow-600/90'} backdrop-blur`}>
-            <h2 className="text-6xl font-black text-white mb-4">{gameState === 'GAMEOVER' ? 'GAME OVER' : 'ESCAPED!'}</h2>
-            <p className="text-xl mb-8">{gameState === 'GAMEOVER' ? `You fell in Building ${currentBuildingId + 1}` : 'You successfully cleared the island.'}</p>
+      {/* --- GAME OVER --- */}
+      {(gameState === 'GAMEOVER') && (
+        <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-red-900/90 backdrop-blur">
+            <h2 className="text-6xl font-black text-white mb-4">GAME OVER</h2>
+            <p className="text-xl mb-8">You fell in Building {currentBuildingId + 1}</p>
             <div className="text-2xl mb-8 font-mono bg-black/30 px-6 py-2 rounded">Final Score: {playerStats.score}</div>
-            <button 
-                onClick={() => setGameState('START')}
-                className="px-8 py-3 bg-white text-black font-bold rounded-full hover:bg-gray-200 flex items-center gap-2"
-            >
+            <button onClick={() => setGameState('START')} className="px-8 py-3 bg-white text-black font-bold rounded-full hover:bg-gray-200 flex items-center gap-2">
                 <RotateCcw /> Return to Title
+            </button>
+        </div>
+      )}
+
+      {/* --- ENDING SEQUENCE --- */}
+      {gameState === 'ENDING' && renderEnding()}
+
+      {/* --- MESSAGE OVERLAY --- */}
+      {gameState === 'MESSAGE' && messageData && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 z-50 text-center px-8">
+            <h2 className="text-4xl font-bold text-yellow-400 mb-6">{messageData.title}</h2>
+            <p className="text-2xl text-white mb-12 max-w-3xl leading-relaxed">{messageData.text}</p>
+            <button 
+                onClick={() => setGameState(messageData.nextState)}
+                className="px-8 py-4 bg-white text-black font-bold rounded-full hover:bg-gray-200 flex items-center gap-2"
+            >
+                <ArrowRight /> Continue
             </button>
         </div>
       )}
